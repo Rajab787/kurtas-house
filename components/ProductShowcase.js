@@ -109,7 +109,7 @@ export default function ProductShowcase() {
       className="relative min-h-[350vh] bg-luxury-950"
     >
       {/* Pinned Viewport Container */}
-      <div className="sticky top-0 h-screen w-full flex flex-col justify-between overflow-hidden px-4 sm:px-8 py-20">
+      <div className="sticky top-0 h-screen w-full flex flex-col justify-between overflow-visible lg:overflow-hidden px-4 sm:px-8 py-20">
         {/* Background ambient lighting */}
         <div
           ref={glowRef}

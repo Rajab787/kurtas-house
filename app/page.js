@@ -20,7 +20,7 @@ import Toast from '@/components/Toast';
 export default function Home() {
   return (
     <ShopProvider>
-      <main className="relative min-h-screen bg-luxury-950 text-luxury-100 overflow-x-hidden selection:bg-gold-500/30 selection:text-gold-200">
+      <main className="relative min-h-screen bg-luxury-950 text-luxury-100 overflow-x-clip selection:bg-gold-500/30 selection:text-gold-200">
         {/* Navigation */}
         <Navbar />
 

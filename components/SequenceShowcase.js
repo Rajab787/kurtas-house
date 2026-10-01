@@ -25,21 +25,20 @@ const TOTAL_FRAMES = 240;
 export default function SequenceShowcase() {
   const containerRef = useRef(null);
   const canvasRef = useRef(null);
-  const [currentFrame, setCurrentFrame] = useState(1);
-  const [loadProgress, setLoadProgress] = useState(0);
+  const frameLabelRef = useRef(null);
+  const progressBarRef = useRef(null);
+  const bufferingRef = useRef(null);
+  const [activeProductIndex, setActiveProductIndex] = useState(0);
   const [activeHotspot, setActiveHotspot] = useState(null);
   const imagesRef = useRef([]);
   const frameObjRef = useRef({ frame: 1 });
+  const frameRenderRafRef = useRef(null);
+  const activeProductRef = useRef(0);
 
   const { addToCart, setQuickViewProduct, formatPrice } = useShop();
 
   // Determine active product based on current frame
-  const activeProduct = useMemo(() => {
-    if (currentFrame <= 60) return PRODUCTS[0];
-    if (currentFrame <= 120) return PRODUCTS[1];
-    if (currentFrame <= 180) return PRODUCTS[2];
-    return PRODUCTS[3];
-  }, [currentFrame]);
+  const activeProduct = useMemo(() => PRODUCTS[activeProductIndex], [activeProductIndex]);
 
   // Format frame number to 5 digits: 1 -> "00001"
   const getFramePath = (idx) => {
@@ -54,24 +53,14 @@ export default function SequenceShowcase() {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
 
-    // Canvas sizing with DPR
-    const updateCanvasSize = () => {
-      if (!canvas) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      renderCurrentFrame(Math.round(frameObjRef.current.frame));
-    };
-
     const renderCurrentFrame = (frameIndex) => {
       if (!canvas || !ctx) return;
       const img = imagesRef.current[frameIndex] || imagesRef.current[1];
       if (!img || !img.complete || img.naturalWidth === 0) return;
 
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const cw = canvas.width;
       const ch = canvas.height;
+      if (!cw || !ch) return;
 
       ctx.clearRect(0, 0, cw, ch);
 
@@ -96,48 +85,91 @@ export default function SequenceShowcase() {
       ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
     };
 
+    const scheduleFrameRender = (frameIndex) => {
+      frameObjRef.current.frame = frameIndex;
+      if (frameRenderRafRef.current !== null) return;
+
+      frameRenderRafRef.current = window.requestAnimationFrame(() => {
+        frameRenderRafRef.current = null;
+        const nextFrame = frameObjRef.current.frame;
+        renderCurrentFrame(nextFrame);
+
+        if (frameLabelRef.current) {
+          frameLabelRef.current.textContent = String(nextFrame).padStart(3, '0');
+        }
+        if (progressBarRef.current) {
+          progressBarRef.current.style.transform = `scaleX(${nextFrame / TOTAL_FRAMES})`;
+        }
+      });
+    };
+
+    // Canvas sizing with DPR
+    const updateCanvasSize = () => {
+      if (!canvas) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      scheduleFrameRender(Math.round(frameObjRef.current.frame));
+    };
+
     // Preload strategy:
     // 1. First priority: load frames 1, 30, 60, 90, 120, 150, 180, 210, 240
     // 2. Second priority: load all remaining frames progressively
     let loadedCount = 0;
     const totalToLoad = TOTAL_FRAMES;
+    const loadingImages = new Set();
+    const priorityIndices = [1, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240];
+    const loadQueue = [
+      ...priorityIndices,
+      ...Array.from({ length: TOTAL_FRAMES }, (_, index) => index + 1).filter(
+        (index) => !priorityIndices.includes(index)
+      ),
+    ];
+    let nextQueueIndex = 0;
+    let activeLoads = 0;
+    const MAX_CONCURRENT_LOADS = 6;
 
     const onImageLoaded = (idx) => {
       if (!isMounted) return;
       loadedCount++;
       const pct = Math.round((loadedCount / totalToLoad) * 100);
-      setLoadProgress(pct);
+      if (bufferingRef.current) {
+        bufferingRef.current.textContent = `Buffering 3D assets: ${pct}%`;
+        bufferingRef.current.hidden = pct >= 100;
+      }
 
       if (idx === 1 || idx === Math.round(frameObjRef.current.frame)) {
-        renderCurrentFrame(Math.round(frameObjRef.current.frame));
+        scheduleFrameRender(Math.round(frameObjRef.current.frame));
       }
     };
 
-    // Progressive loader
-    const loadBatch = async () => {
-      // Priority frames first
-      const priorityIndices = [1, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240];
-      for (const i of priorityIndices) {
-        if (!imagesRef.current[i]) {
-          const img = new Image();
-          img.src = getFramePath(i);
-          img.onload = () => onImageLoaded(i);
-          imagesRef.current[i] = img;
-        }
-      }
+    const pumpImageQueue = () => {
+      while (isMounted && activeLoads < MAX_CONCURRENT_LOADS && nextQueueIndex < loadQueue.length) {
+        const index = loadQueue[nextQueueIndex++];
+        if (imagesRef.current[index]) continue;
 
-      // Load all other frames in chunks
-      for (let i = 1; i <= TOTAL_FRAMES; i++) {
-        if (!imagesRef.current[i]) {
-          const img = new Image();
-          img.src = getFramePath(i);
-          img.onload = () => onImageLoaded(i);
-          imagesRef.current[i] = img;
-        }
+        const img = new Image();
+        img.decoding = 'async';
+        if (priorityIndices.includes(index)) img.fetchPriority = 'high';
+        imagesRef.current[index] = img;
+        loadingImages.add(img);
+        activeLoads++;
+
+        const finishLoad = () => {
+          activeLoads--;
+          loadingImages.delete(img);
+          onImageLoaded(index);
+          pumpImageQueue();
+        };
+
+        img.onload = finishLoad;
+        img.onerror = finishLoad;
+        img.src = getFramePath(index);
       }
     };
 
-    loadBatch();
+    pumpImageQueue();
     updateCanvasSize();
     window.addEventListener('resize', updateCanvasSize);
 
@@ -156,9 +188,13 @@ export default function SequenceShowcase() {
         onUpdate: (self) => {
           const progress = self.progress;
           const targetFrame = Math.max(1, Math.min(TOTAL_FRAMES, Math.round(1 + progress * (TOTAL_FRAMES - 1))));
-          frameObjRef.current.frame = targetFrame;
-          setCurrentFrame(targetFrame);
-          renderCurrentFrame(targetFrame);
+          scheduleFrameRender(targetFrame);
+
+          const productIndex = Math.min(3, Math.floor((targetFrame - 1) / 60));
+          if (productIndex !== activeProductRef.current) {
+            activeProductRef.current = productIndex;
+            setActiveProductIndex(productIndex);
+          }
         },
       });
     }
@@ -166,6 +202,15 @@ export default function SequenceShowcase() {
     return () => {
       isMounted = false;
       window.removeEventListener('resize', updateCanvasSize);
+      if (frameRenderRafRef.current !== null) {
+        window.cancelAnimationFrame(frameRenderRafRef.current);
+      }
+      loadingImages.forEach((img) => {
+        img.onload = null;
+        img.onerror = null;
+        img.src = '';
+      });
+      imagesRef.current = [];
       if (scrollTriggerInstance) scrollTriggerInstance.kill();
     };
   }, []);
@@ -204,19 +249,18 @@ export default function SequenceShowcase() {
         {/* Frame Progress Indicator */}
         <div className="pointer-events-auto flex flex-col items-end">
           <div className="text-[11px] sm:text-xs font-mono tracking-widest text-luxury-300">
-            FRAME <span className="text-gold-400 font-semibold">{String(currentFrame).padStart(3, '0')}</span> / {TOTAL_FRAMES}
+            FRAME <span ref={frameLabelRef} className="text-gold-400 font-semibold">001</span> / {TOTAL_FRAMES}
           </div>
           <div className="w-32 sm:w-48 h-1 bg-white/10 rounded-full mt-2 overflow-hidden">
             <div
+              ref={progressBarRef}
               className="h-full bg-gradient-to-r from-gold-600 via-gold-400 to-gold-300 transition-all duration-75"
-              style={{ width: `${(currentFrame / TOTAL_FRAMES) * 100}%` }}
+              style={{ width: '100%', transform: 'scaleX(0)', transformOrigin: 'left center' }}
             />
           </div>
-          {loadProgress < 100 && (
-            <span className="text-[9px] text-luxury-400 mt-1">
-              Buffering 3D assets: {loadProgress}%
-            </span>
-          )}
+          <span ref={bufferingRef} className="text-[9px] text-luxury-400 mt-1">
+            Buffering 3D assets: 0%
+          </span>
         </div>
       </div>
 
